@@ -10,6 +10,10 @@ import models
 import auth
 from agent import tourism_agent  # තිත නැතිව Import කිරීම
 
+from pydantic import BaseModel
+from typing import List
+from langchain_core.messages import HumanMessage, AIMessage
+
 # 1. Environment Variables
 load_dotenv()
 
@@ -48,21 +52,45 @@ def login(email: str, password: str, db: Session = Depends(get_db)):
     access_token = auth.create_access_token(data={"sub": user.email})
     return {"access_token": access_token, "token_type": "bearer"}
 
-# --- Chat ---
+# --- Request Body Model (දත්ත ලබා ගන්නා ආකෘතිය) ---
+class ChatRequest(BaseModel):
+    user_query: str
+    user_id: int
+    history: List[dict] = []  # කලින් කතා කළ දේවල් මෙතනට එනවා
+
+# --- 3. AI Chat (Context සමඟ) ---
 @app.post("/chat")
-async def chat_with_ai(user_query: str, user_id: int, db: Session = Depends(get_db)):
-    # Agent හරහා පිළිතුර ගැනීම
-    inputs = {"messages": [HumanMessage(content=user_query)]}
+async def chat_with_ai(request: ChatRequest, db: Session = Depends(get_db)):
+    # 1. Frontend එකෙන් එන History එක LangChain format එකට හරවමු
+    formatted_history = []
+    
+    for msg in request.history:
+        if msg['role'] == "user":
+            formatted_history.append(HumanMessage(content=msg['content']))
+        elif msg['role'] == "assistant":
+            formatted_history.append(AIMessage(content=msg['content']))
+    
+    # 2. අලුත් ප්‍රශ්නය අන්තිමට එකතු කරන්න
+    formatted_history.append(HumanMessage(content=request.user_query))
+    
+    # 3. Agent ට සම්පූර්ණ History එකම යවමු
+    inputs = {"messages": formatted_history}
     result = tourism_agent.invoke(inputs)
+    
+    # AI එකේ අන්තිම උත්තරය ගන්න
     ai_response = result["messages"][-1].content
 
-    # Database සේව් කිරීම
-    new_log = models.ChatLog(user_id=user_id, query=user_query, response=ai_response)
+    # 4. Database එකේ සේව් කිරීම
+    new_log = models.ChatLog(
+        user_id=request.user_id, 
+        query=request.user_query, 
+        response=ai_response
+    )
     db.add(new_log)
     db.commit()
 
     return {
-        "user_query": user_query,
+        "user_query": request.user_query,
         "ai_response": ai_response,
         "status": "Processed by LangGraph Agent"
     }
